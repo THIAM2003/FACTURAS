@@ -1,0 +1,213 @@
+--TRIGGER MODIFICACION DE TOTAL EN FACTURA
+
+CREATE OR REPLACE TRIGGER ACTUALIZAR_VALOR_TOTAL_FACTURA
+AFTER INSERT OR UPDATE OR DELETE ON DETALLE_FACTURA_CLIENTE
+FOR EACH ROW
+BEGIN
+    UPDATE FACTURA
+    SET VALOR_TOTAL = (
+        SELECT SUM(SUBTOTAL)
+        FROM DETALLE_FACTURA_CLIENTE
+        WHERE FACTURA_ID = :NEW.FACTURA_ID
+    )
+    WHERE ID = :NEW.FACTURA_ID;
+END;
+
+--TRIGGER MODIFICACION DE SUBTOTAL EN DETALLE_FACTURA
+
+CREATE OR REPLACE TRIGGER MODIFICACION_SUBTOTAL
+BEFORE INSERT OR UPDATE ON DETALLE_FACTURA_INGREDIENTE
+FOR EACH ROW
+DECLARE
+    v_precio_LIBRA NUMBER(20);
+BEGIN
+    -- Obtener el precio LIBRA del producto
+    SELECT PRECIO_LIBRA
+    INTO v_precio_LIBRA
+    FROM INGREDIENTE
+    WHERE ID = :NEW.INGREDIENTE_ID;
+
+    -- Calcular el subtotal como cantidad * precio LIBRA
+    :NEW.SUBTOTAL := :NEW.CANTIDAD_INGREDIENTE * v_precio_LIBRA;
+END;
+
+CREATE OR REPLACE TRIGGER MODIFICACION_SUBTOTAL_CLIENTE
+BEFORE INSERT OR UPDATE ON DETALLE_FACTURA_CLIENTE
+FOR EACH ROW
+DECLARE
+    v_precio_unitario NUMBER(20);
+BEGIN
+    -- Obtener el precio unitario del producto
+    SELECT PRECIO_UNITARIO
+    INTO v_precio_unitario
+    FROM PRODUCTO
+    WHERE ID = :NEW.PRODUCTO_ID;
+
+    -- Calcular el subtotal como cantidad * precio unitario
+    :NEW.SUBTOTAL := :NEW.CANTIDAD_PRODUCTO * v_precio_unitario;
+END;
+
+-- TRIGGER CALCULO DEL PRECIO_PRODUCCION AL ACTUALIZAR PRECIO_LIBRA, EL OF ES DE ORACLE SQL
+
+/* ESTE TRIGGER NO FUNCIONA.
+CREATE OR REPLACE TRIGGER ACTUALIZAR_PRECIO_PRODUCCION
+AFTER UPDATE OF PRECIO_LIBRA ON INGREDIENTE
+FOR EACH ROW
+BEGIN
+    -- Actualizar el PRECIO_PRODUCCION en PRODUCTO_INGREDIENTE
+    UPDATE PRODUCTO_INGREDIENTE
+    SET PRECIO_PRODUCCION = FRACCION_LIBRA * :NEW.PRECIO_LIBRA
+    WHERE INGREDIENTE_ID = :OLD.ID;
+END;*/
+
+--COMO NO TIENE FOR EACH ROW, SE EJECUTA UNA VEZ PARA TODA LA TABLA
+CREATE OR REPLACE TRIGGER ACTUALIZAR_PRECIO_PRODUCCION
+AFTER UPDATE OF PRECIO_LIBRA ON INGREDIENTE
+BEGIN
+    -- Actualizar el PRECIO_PRODUCCION en PRODUCTO_INGREDIENTE
+    UPDATE PRODUCTO_INGREDIENTE PI
+    SET PI.PRECIO_PRODUCCION = PI.FRACCION_LIBRA * 
+                               (SELECT i.PRECIO_LIBRA 
+                                FROM INGREDIENTE i 
+                                WHERE i.ID = PI.INGREDIENTE_ID)
+    WHERE pi.INGREDIENTE_ID IN (SELECT ID FROM INGREDIENTE);
+END;
+
+--TRIGGER CALCULO AUTOMATICO PRECIO_PRODUCCION
+
+CREATE OR REPLACE TRIGGER CALCULAR_PRECIO_PRODUCCION
+BEFORE INSERT OR UPDATE ON PRODUCTO_INGREDIENTE
+FOR EACH ROW
+DECLARE
+    v_precio_libra NUMBER(20);
+BEGIN
+    -- Obtener el precio por libra del ingrediente
+    SELECT PRECIO_LIBRA
+    INTO v_precio_libra
+    FROM INGREDIENTE
+    WHERE ID = :NEW.INGREDIENTE_ID;
+
+    -- Calcular el precio de producción como fracción de libra por precio por libra
+    :NEW.PRECIO_PRODUCCION := :NEW.FRACCION_LIBRA * v_precio_libra;
+END;
+
+--TRIGGER CALCULO AUTOMATICO PRECIO PRODUCTO
+/* Error de tabla mutating
+CREATE OR REPLACE TRIGGER CALCULAR_PRECIO_UNITARIO_PRODUCTO
+BEFORE INSERT OR UPDATE ON PRODUCTO_INGREDIENTE
+FOR EACH ROW
+DECLARE
+    v_precio_total NUMBER(20,2) := 0;
+BEGIN
+    -- Calcular el precio total de producción del producto
+    SELECT COALESCE(SUM(PRECIO_PRODUCCION), 0)
+    INTO v_precio_total
+    FROM PRODUCTO_INGREDIENTE
+    WHERE PRODUCTO_ID = :NEW.PRODUCTO_ID;
+
+    -- Actualizar el precio unitario del producto en la tabla PRODUCTO
+    UPDATE PRODUCTO
+    SET PRECIO_UNITARIO = v_precio_total * 2
+    WHERE ID = :NEW.PRODUCTO_ID;
+END; */
+
+CREATE GLOBAL TEMPORARY TABLE TEMP_PRODUCTO_IDS (
+    PRODUCTO_ID NUMBER(20) PRIMARY KEY
+) ON COMMIT DELETE ROWS;
+
+CREATE OR REPLACE TRIGGER ADD_TO_TEMP_PRODUCTO_IDS
+AFTER INSERT OR UPDATE ON PRODUCTO_INGREDIENTE
+FOR EACH ROW
+BEGIN
+    BEGIN
+        -- Inserta el PRODUCTO_ID en la tabla temporal si aún no está registrado
+        INSERT INTO TEMP_PRODUCTO_IDS (PRODUCTO_ID) VALUES (:NEW.PRODUCTO_ID);
+    EXCEPTION
+        WHEN DUP_VAL_ON_INDEX THEN
+            -- Si el PRODUCTO_ID ya está en TEMP_PRODUCTO_IDS, lo ignora
+            NULL;
+    END;
+END;
+
+CREATE OR REPLACE TRIGGER CALCULAR_PRECIO_UNITARIO_STATEMENT
+AFTER INSERT OR UPDATE ON PRODUCTO_INGREDIENTE
+DECLARE
+    CURSOR producto_cursor IS
+        SELECT DISTINCT PRODUCTO_ID FROM TEMP_PRODUCTO_IDS;
+    v_precio_total NUMBER(20,2);
+BEGIN
+    -- Para cada producto en la lista temporal, calcula y actualiza el PRECIO_UNITARIO
+    FOR producto_rec IN producto_cursor LOOP
+        SELECT COALESCE(SUM(PRECIO_PRODUCCION), 0) INTO v_precio_total
+        FROM PRODUCTO_INGREDIENTE
+        WHERE PRODUCTO_ID = producto_rec.PRODUCTO_ID;
+
+        -- Actualizar el precio unitario del producto en la tabla PRODUCTO
+        UPDATE PRODUCTO
+        SET PRECIO_UNITARIO = v_precio_total * 2
+        WHERE ID = producto_rec.PRODUCTO_ID;
+    END LOOP;
+    
+    -- Limpia la tabla temporal al final de la operación
+    DELETE FROM TEMP_PRODUCTO_IDS;
+END;
+
+--TRANSACCIÓN PARA FACTURA Y DETALLE_FACTURA-- EN SQL NO SE DEBE ESCRIBIR TRANSACTION YA QUE CON BEGIN Y END SE SOBREENTIENDE
+DECLARE
+    factura_id NUMBER;  -- Variable para almacenar el ID generado de la factura
+BEGIN
+    -- Paso 1: Insertar la factura
+    INSERT INTO FACTURA (FECHA_CREACION)
+    VALUES (SYSDATE)
+    RETURNING ID INTO factura_id;  -- Obtener el ID generado de la factura
+
+    -- Paso 2: Insertar detalles de la factura
+    INSERT INTO DETALLE_FACTURA_CLIENTE (FACTURA_ID, CLIENTE_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
+    VALUES (factura_id, 1, 1, 2);  -- Ejemplo de producto con ID=1, cantidad=2
+
+    INSERT INTO DETALLE_FACTURA_CLIENTE (FACTURA_ID, CLIENTE_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
+    VALUES (factura_id, 2, 2, 1);  -- Ejemplo de producto con ID=2, cantidad=1
+
+    -- Paso 3: Actualizar el total en la factura (suma de subtotales)
+    UPDATE FACTURA
+    SET VALOR_TOTAL = (
+        SELECT SUM(SUBTOTAL) 
+        FROM DETALLE_FACTURA_CLIENTE
+        WHERE FACTURA_ID = factura_id
+    )
+    WHERE ID = factura_id;
+
+    -- Confirmar la transacción
+    COMMIT;
+END;
+
+/*
+BEGIN TRANSACTION
+    -- Paso 1: Insertar la factura
+    INSERT INTO FACTURA (FECHA)
+    VALUES (SYSDATE)
+    RETURNING ID INTO :factura_id;  -- Obtener el ID generado de la factura
+    
+    -- Paso 2: Insertar detalles de la factura
+    INSERT INTO DETALLE_FACTURA (FACTURA_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
+    VALUES (:factura_id, 1, 2);  -- Ejemplo de producto con ID=1, cantidad=2
+
+    INSERT INTO DETALLE_FACTURA (FACTURA_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
+    VALUES (:factura_id, 2, 1);  -- Ejemplo de producto con ID=2, cantidad=1
+
+    -- Paso 3: Actualizar el total en la factura (suma de subtotales)
+    UPDATE FACTURA
+    SET VALOR_TOTAL = (
+        SELECT SUM(SUBTOTAL) FROM DETALLE_FACTURA WHERE FACTURA_ID = :factura_id
+    )
+    WHERE ID = :factura_id;
+
+    -- Confirma la transacción
+    COMMIT;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Si ocurre un error, revierte toda la transacción
+        ROLLBACK;
+        DBMS_OUTPUT.PUT_LINE('Error en la transacción: ' || SQLERRM);
+END; */
