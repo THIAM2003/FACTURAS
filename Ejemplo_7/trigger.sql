@@ -15,6 +15,21 @@ BEGIN
     );
 END;
 
+CREATE OR REPLACE TRIGGER ACTUALIZAR_VALOR_TOTAL_FACTURA
+AFTER INSERT OR UPDATE OR DELETE ON DETALLE_FACTURA_INGREDIENTE
+BEGIN
+    UPDATE FACTURA
+    SET VALOR_TOTAL = (
+        SELECT SUM(SUBTOTAL)
+        FROM DETALLE_FACTURA_INGREDIENTE
+        WHERE FACTURA_ID = FACTURA.ID
+    )
+    WHERE ID IN (
+        SELECT DISTINCT FACTURA_ID
+        FROM DETALLE_FACTURA_INGREDIENTE
+    );
+END;
+
 --TRIGGER MODIFICACION DE SUBTOTAL EN DETALLE_FACTURA
 
 CREATE OR REPLACE TRIGGER MODIFICACION_SUBTOTAL
@@ -145,58 +160,94 @@ BEGIN
 END;
 
 --TRANSACCIÓN PARA FACTURA Y DETALLE_FACTURA-- EN SQL NO SE DEBE ESCRIBIR TRANSACTION YA QUE CON BEGIN Y END SE SOBREENTIENDE
+
+-- CREAR DETALLE_FACTURA_INGREDIENTE AL AZAR
 DECLARE
-    factura_id NUMBER;  -- Variable para almacenar el ID generado de la factura
+    v_factura_id NUMBER;
+    v_ingrediente_id NUMBER;
+    v_cantidad NUMBER;
 BEGIN
-    -- Paso 1: Insertar la factura
-    INSERT INTO FACTURA (FECHA_CREACION)
-    VALUES (SYSDATE)
-    RETURNING ID INTO factura_id;  -- Obtener el ID generado de la factura
+    FOR j IN 1..100 LOOP  -- Repetir la transacción 100 veces
+        -- Crear una nueva factura con una fecha aleatoria dentro del último año
+        INSERT INTO FACTURA (FECHA_CREACION)
+        VALUES (TRUNC(SYSDATE - DBMS_RANDOM.VALUE(1, 365)))
+        RETURNING ID INTO v_factura_id;
 
-    -- Paso 2: Insertar detalles de la factura
-    INSERT INTO DETALLE_FACTURA_CLIENTE (FACTURA_ID, CLIENTE_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
-    VALUES (factura_id, 1, 1, 2);  -- Ejemplo de producto con ID=1, cantidad=2
+        -- Insertar detalles en DETALLE_FACTURA_INGREDIENTE para la factura creada
+        FOR i IN 1..10 LOOP  -- Genera 10 detalles para cada factura
+            -- Generar datos aleatorios para el detalle de la factura ingrediente
+            v_ingrediente_id := TRUNC(DBMS_RANDOM.VALUE(1, 41));  -- Asume que hay ingredientes con IDs del 1 al 41
+            v_cantidad := TRUNC(DBMS_RANDOM.VALUE(1, 5));         -- Cantidad entre 1 y 5
 
-    INSERT INTO DETALLE_FACTURA_CLIENTE (FACTURA_ID, CLIENTE_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
-    VALUES (factura_id, 2, 2, 1);  -- Ejemplo de producto con ID=2, cantidad=1
+            INSERT INTO DETALLE_FACTURA_INGREDIENTE (FACTURA_ID, INGREDIENTE_ID, CANTIDAD_INGREDIENTE)
+            VALUES (v_factura_id, v_ingrediente_id, v_cantidad);
+        END LOOP;
+    END LOOP;
 
-    -- Paso 3: Actualizar el total en la factura (suma de subtotales)
-    UPDATE FACTURA
-    SET VALOR_TOTAL = (
-        SELECT SUM(SUBTOTAL) 
-        FROM DETALLE_FACTURA_CLIENTE
-        WHERE FACTURA_ID = factura_id
-    )
-    WHERE ID = factura_id;
+    -- Confirmar todas las transacciones al final
+    COMMIT;
+END;
+
+-- CREAR DETALLE_FACTURA_CLIENTE AL AZAR
+DECLARE
+    v_factura_id NUMBER;
+    v_cliente_id NUMBER;
+BEGIN
+    FOR j IN 1..100 LOOP  -- Repetir la transacción 100 veces
+        -- Paso 1: Crear una nueva factura con una fecha aleatoria dentro del último año
+        INSERT INTO FACTURA (FECHA_CREACION)
+        VALUES (TRUNC(SYSDATE - DBMS_RANDOM.VALUE(1, 365)))
+        RETURNING ID INTO v_factura_id;
+
+        -- Paso 2: Seleccionar un CLIENTE_ID aleatorio existente
+        SELECT ID INTO v_cliente_id
+        FROM (SELECT ID FROM CLIENTE ORDER BY DBMS_RANDOM.RANDOM) 
+        WHERE ROWNUM = 1;
+
+        -- Paso 3: Insertar transacciones aleatorias en DETALLE_FACTURA_CLIENTE
+        FOR i IN 1..5 LOOP  -- Inserta 5 detalles como ejemplo
+            INSERT INTO DETALLE_FACTURA_CLIENTE (FACTURA_ID, CLIENTE_ID, PRODUCTO_ID, CANTIDAD_PRODUCTO)
+            VALUES (
+                v_factura_id,
+                v_cliente_id,
+                FLOOR(DBMS_RANDOM.VALUE(1, 35)),  -- Producto ID aleatorio entre 1 y 35
+                FLOOR(DBMS_RANDOM.VALUE(1, 4))   -- Cantidad aleatoria entre 1 y 4
+            );
+        END LOOP;
+    END LOOP;
 
     -- Confirmar la transacción
     COMMIT;
 END;
 
+--CREAR CLIENTES AL AZAR
 DECLARE
-    factura_id NUMBER;  -- Variable para almacenar el ID generado de la factura
+    v_nombre VARCHAR2(100);
+    v_documento VARCHAR2(20);
+    v_tipo_documento VARCHAR2(3);
+    v_email VARCHAR2(100);
 BEGIN
-    -- Paso 1: Insertar la factura
-    INSERT INTO FACTURA (FECHA_CREACION)
-    VALUES (SYSDATE)
-    RETURNING ID INTO factura_id;  -- Obtener el ID generado de la factura
+    FOR i IN 1..50 LOOP
+        -- Generar un nombre aleatorio
+        v_nombre := 'Cliente_' || DBMS_RANDOM.STRING('U', 6);
+        
+        -- Generar un documento único de 9 dígitos
+        v_documento := TO_CHAR(TRUNC(DBMS_RANDOM.VALUE(100000000, 999999999)));
 
-    -- Paso 2: Insertar detalles de la factura
-    INSERT INTO DETALLE_FACTURA_INGREDIENTE (FACTURA_ID, INGREDIENTE_ID, CANTIDAD_INGREDIENTE)
-    VALUES (factura_id, 1, 1);  -- Ejemplo de ingrediente con ID=1, cantidad=1
+        -- Seleccionar un tipo de documento aleatorio
+        v_tipo_documento := CASE TRUNC(DBMS_RANDOM.VALUE(1, 4))
+                               WHEN 1 THEN 'CC'
+                               WHEN 2 THEN 'TI'
+                               ELSE 'PAS'
+                            END;
+        
+        -- Generar un email con el nombre aleatorio
+        v_email := LOWER(v_nombre) || '@example.com';
 
-    INSERT INTO DETALLE_FACTURA_INGREDIENTE (FACTURA_ID, INGREDIENTE_ID, CANTIDAD_INGREDIENTE)
-    VALUES (factura_id, 2, 2);  -- Ejemplo de ingrediente con ID=2, cantidad=2
+        -- Insertar el cliente en la tabla
+        INSERT INTO CLIENTE (NOMBRE, DOCUMENTO, TIPO_DOCUMENTO, EMAIL)
+        VALUES (v_nombre, v_documento, v_tipo_documento, v_email);
+    END LOOP;
 
-    -- Paso 3: Actualizar el total en la factura (suma de subtotales)
-    UPDATE FACTURA
-    SET VALOR_TOTAL = (
-        SELECT SUM(SUBTOTAL) 
-        FROM DETALLE_FACTURA_INGREDIENTE
-        WHERE FACTURA_ID = factura_id
-    )
-    WHERE ID = factura_id;
-
-    -- Confirmar la transacción
     COMMIT;
 END;
